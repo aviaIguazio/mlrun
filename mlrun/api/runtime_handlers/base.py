@@ -846,9 +846,10 @@ class BaseRuntimeHandler(ABC):
             uid=uid,
         )
 
-        self._ensure_run_state(db, db_session, project, uid, name, run_state)
-
-        self._ensure_run_logs_collected(db, db_session, project, uid)
+        _, _, run = self._ensure_run_state(
+            db, db_session, project, uid, name, run_state
+        )
+        self._ensure_run_logs_collected(db, db_session, project, uid, run=run)
 
     def _is_runtime_resource_run_in_terminal_state(
         self,
@@ -885,7 +886,21 @@ class BaseRuntimeHandler(ABC):
     def _list_runs_for_monitoring(
         self, db: DBInterface, db_session: Session, states: list = None
     ):
-        runs = db.list_runs(db_session, project="*", states=states)
+        last_update_time_from = None
+        if config.monitoring.runs.list_runs_time_period_in_days:
+            last_update_time_from = (
+                datetime.now()
+                - timedelta(
+                    days=int(config.monitoring.runs.list_runs_time_period_in_days)
+                )
+            ).isoformat()
+
+        runs = db.list_runs(
+            db_session,
+            project="*",
+            states=states,
+            last_update_time_from=last_update_time_from,
+        )
         project_run_uid_map = {}
         run_with_missing_data = []
         duplicated_runs = []
@@ -972,7 +987,7 @@ class BaseRuntimeHandler(ABC):
             name,
             run_state,
             run,
-            search_run=False,
+            search_run=True,
         )
 
         # Update the UI URL after ensured run state because it also ensures that a run exists
@@ -980,7 +995,7 @@ class BaseRuntimeHandler(ABC):
         self._update_ui_url(db, db_session, project, uid, runtime_resource, run)
 
         if updated_run_state in RunStates.terminal_states():
-            self._ensure_run_logs_collected(db, db_session, project, uid)
+            self._ensure_run_logs_collected(db, db_session, project, uid, run=run)
 
     def _build_list_resources_response(
         self,
@@ -1123,7 +1138,7 @@ class BaseRuntimeHandler(ABC):
 
     @staticmethod
     def _ensure_run_logs_collected(
-        db: DBInterface, db_session: Session, project: str, uid: str
+        db: DBInterface, db_session: Session, project: str, uid: str, run: Dict = None
     ):
         # import here to avoid circular imports
         import mlrun.api.crud as crud
@@ -1133,7 +1148,7 @@ class BaseRuntimeHandler(ABC):
             # this stays for now for backwards compatibility in case we would not use the log collector but rather
             # the legacy method to pull logs
             logs_from_k8s = crud.Logs()._get_logs_legacy_method(
-                db_session, project, uid, source=LogSources.K8S
+                db_session, project, uid, source=LogSources.K8S, run=run
             )
             if logs_from_k8s:
                 logger.info("Storing run logs", project=project, uid=uid)
@@ -1152,7 +1167,7 @@ class BaseRuntimeHandler(ABC):
     ) -> Tuple[bool, str, dict]:
         if run is None:
             run = {}
-        if search_run:
+        if not run and search_run:
             try:
                 run = db.read_run(db_session, uid, project)
             except mlrun.errors.MLRunNotFoundError:
