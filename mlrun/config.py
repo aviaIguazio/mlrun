@@ -109,7 +109,10 @@ default_config = {
         "runs": {
             # deleting runs is a heavy operation that includes deleting runtime resources, therefore we do it in chunks
             "batch_delete_runs_chunk_size": 10,
-        }
+        },
+        "resources": {
+            "delete_crd_resources_timeout": "5 minutes",
+        },
     },
     # the grace period (in seconds) that will be given to runtime resources (after they're in terminal state)
     # before deleting them (4 hours)
@@ -285,6 +288,12 @@ default_config = {
         "state": "online",
         "retry_api_call_on_exception": "enabled",
         "http_connection_timeout_keep_alive": 11,
+        # http client used by httpdb
+        "http": {
+            # when True, the client will verify the server's TLS
+            # set to False for backwards compatibility.
+            "verify": False,
+        },
         "db": {
             "commit_retry_timeout": 30,
             "commit_retry_interval": 3,
@@ -303,7 +312,11 @@ default_config = {
                 # default is 16MB, max 1G, for more info https://dev.mysql.com/doc/refman/8.0/en/packet-too-large.html
                 "max_allowed_packet": 64000000,  # 64MB
             },
-            # None will set this to be equal to the httpdb.max_workers
+            # tests connections for liveness upon each checkout
+            "connections_pool_pre_ping": True,
+            # this setting causes the pool to recycle connections after the given number of seconds has passed
+            "connections_pool_recycle": 60 * 60,
+            # None defaults to httpdb.max_workers
             "connections_pool_size": None,
             "connections_pool_max_overflow": None,
             # below is a db-specific configuration
@@ -408,7 +421,7 @@ default_config = {
             "iguazio_access_key": "",
             "iguazio_list_projects_default_page_size": 200,
             "iguazio_client_job_cache_ttl": "20 minutes",
-            "nuclio_project_deletion_verification_timeout": "60 seconds",
+            "nuclio_project_deletion_verification_timeout": "300 seconds",
             "nuclio_project_deletion_verification_interval": "5 seconds",
         },
         # The API needs to know what is its k8s svc url so it could enrich it in the jobs it creates
@@ -431,7 +444,7 @@ default_config = {
             # pip install <requirement_specifier>, e.g. mlrun==0.5.4, mlrun~=0.5,
             # git+https://github.com/mlrun/mlrun@development. by default uses the version
             "mlrun_version_specifier": "",
-            "kaniko_image": "gcr.io/kaniko-project/executor:v1.8.0",  # kaniko builder image
+            "kaniko_image": "gcr.io/kaniko-project/executor:v1.21.1",  # kaniko builder image
             "kaniko_init_container_image": "alpine:3.18",
             # image for kaniko init container when docker registry is ECR
             "kaniko_aws_cli_image": "amazon/aws-cli:2.7.10",
@@ -478,8 +491,8 @@ default_config = {
         "offline_storage_path": "model-endpoints/{kind}",
         # Default http path that points to the monitoring stream nuclio function. Will be used as a stream path
         # when the user is working in CE environment and has not provided any stream path.
-        "default_http_sink": "http://nuclio-{project}-model-monitoring-stream.mlrun.svc.cluster.local:8080",
-        "default_http_sink_app": "http://nuclio-{project}-{application_name}.mlrun.svc.cluster.local:8080",
+        "default_http_sink": "http://nuclio-{project}-model-monitoring-stream.{namespace}.svc.cluster.local:8080",
+        "default_http_sink_app": "http://nuclio-{project}-{application_name}.{namespace}.svc.cluster.local:8080",
         "batch_processing_function_branch": "master",
         "parquet_batching_max_events": 10_000,
         "parquet_batching_timeout_secs": timedelta(minutes=1).total_seconds(),
@@ -599,7 +612,7 @@ default_config = {
     "workflows": {
         "default_workflow_runner_name": "workflow-runner-{}",
         # Default timeout seconds for retrieving workflow id after execution:
-        "timeouts": {"local": 120, "kfp": 30, "remote": 30},
+        "timeouts": {"local": 120, "kfp": 30, "remote": 90},
     },
     "log_collector": {
         "address": "localhost:8282",
@@ -951,10 +964,10 @@ class Config:
             with_gpu = (
                 with_gpu_requests if requirement == "requests" else with_gpu_limits
             )
-            resources[
-                requirement
-            ] = self.get_default_function_pod_requirement_resources(
-                requirement, with_gpu
+            resources[requirement] = (
+                self.get_default_function_pod_requirement_resources(
+                    requirement, with_gpu
+                )
             )
         return resources
 
@@ -1337,12 +1350,21 @@ def read_env(env=None, prefix=env_prefix):
         if igz_domain:
             config["ui_url"] = f"https://mlrun-ui.{igz_domain}"
 
-    if config.get("log_level"):
+    if log_level := config.get("log_level"):
         import mlrun.utils.logger
 
         # logger created (because of imports mess) before the config is loaded (in tests), therefore we're changing its
         # level manually
-        mlrun.utils.logger.set_logger_level(config["log_level"])
+        mlrun.utils.logger.set_logger_level(log_level)
+
+    if log_formatter_name := config.get("log_formatter"):
+        import mlrun.utils.logger
+
+        log_formatter = mlrun.utils.create_formatter_instance(
+            mlrun.utils.FormatterKinds(log_formatter_name)
+        )
+        mlrun.utils.logger.get_handler("default").setFormatter(log_formatter)
+
     # The default function pod resource values are of type str; however, when reading from environment variable numbers,
     # it converts them to type int if contains only number, so we want to convert them to str.
     _convert_resources_to_str(config)
